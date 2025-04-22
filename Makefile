@@ -28,6 +28,9 @@ build: ## Build binary.
 docker-build: ## Build docker image.
 	docker build -t $(IMAGE) -f Dockerfile .
 
-docker-build-multi-arch:
+docker-push:  ## Push docker image. 
+	docker push $(IMAGE)
+
+docker-buildx-multi-arch:
 	docker buildx build --push --platform=linux/amd64,linux/arm64  -t $(IMAGE) -f Dockerfile .
 
