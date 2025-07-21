@@ -79,6 +79,7 @@ func (c *CoreHelper) applyCRDsFromChart(ctx context.Context) error {
 			return err
 		}
 	}
+	klog.Info("crds applied successfully")
 	return nil
 }
 
@@ -122,6 +123,7 @@ func (c *CoreHelper) applyCRDsFromSubchartsByTag(ctx context.Context, tag string
 			}
 		}
 	}
+	klog.Info("crds applied successfully")
 	return nil
 }
 

@@ -3,6 +3,7 @@ module github.com/kubesphere-extensions/upgrade
 go 1.24.0
 
 require (
+	github.com/hashicorp/go-version v1.7.0
 	github.com/pkg/errors v0.9.1
 	github.com/stretchr/testify v1.10.0
 	gopkg.in/yaml.v2 v2.4.0

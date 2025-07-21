@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strings"
 
 	"helm.sh/helm/v3/pkg/chart"
@@ -15,16 +16,18 @@ import (
 	runtimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 	restconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 
+	"github.com/hashicorp/go-version"
 	"github.com/kubesphere-extensions/upgrade/pkg/config"
 	"github.com/kubesphere-extensions/upgrade/pkg/hooks"
 	_ "github.com/kubesphere-extensions/upgrade/pkg/hooks/whizard-monitoring"
 )
 
 type CoreHelper struct {
-	extensionName string
-	isExtension   bool
-	cfg           *config.ExtensionUpgradeHookConfig
-	chart         *chart.Chart
+	extensionName    string
+	extensionVersion string
+	isExtension      bool
+	cfg              *config.ExtensionUpgradeHookConfig
+	chart            *chart.Chart
 
 	client        runtimeclient.Client
 	scheme        *runtime.Scheme
@@ -81,6 +84,8 @@ func NewCoreHelper() (*CoreHelper, error) {
 	}
 
 	c.chart = chart
+	c.extensionVersion = chart.Metadata.Version
+
 	c.cfg = cfg
 	klog.Infof("extension %s upgrade config: %+v", c.extensionName, cfg)
 
@@ -94,60 +99,102 @@ func (c *CoreHelper) Run(ctx context.Context) error {
 		return nil
 	}
 
-	// apply crds
+	err := func(ctx context.Context) error {
+		if err := c.runApplyCRDs(ctx); err != nil {
+			return fmt.Errorf("failed to apply CRDs: %s", err)
+		}
+		if err := c.runBuiltInHooks(ctx); err != nil {
+			return fmt.Errorf("failed to run built-in hooks: %s", err)
+		}
+		if err := c.runExtraConfig(ctx); err != nil {
+			return fmt.Errorf("failed to run extra config: %s", err)
+		}
+		return nil
+	}(ctx)
+	if err != nil {
+		if c.cfg.FailurePolicy == config.IgnoreError {
+			klog.Errorf("extension %s upgrade failed, but ignoring error due to failure policy: %s", c.extensionName, err)
+			return nil
+		}
+		return err
+	}
+
+	klog.Infof("extension %s upgrade completed successfully", c.extensionName)
+
+	return nil
+}
+
+func (c *CoreHelper) runApplyCRDs(ctx context.Context) error {
 	if config.GetHookEnvAction() == config.ActionInstall && c.cfg.InstallCrds ||
 		config.GetHookEnvAction() == config.ActionUpgrade && c.cfg.UpgradeCrds {
 
 		klog.Info("force update of crd before extension installation or upgrade")
 
-		/*
-			if err := c.applyCRDsFromChart(ctx); err != nil {
-				return err
-			}
-		*/
-
 		if c.isExtension {
-			c.applyCRDsFromSubchartsByTag(ctx, "extension")
+			return c.applyCRDsFromSubchartsByTag(ctx, "extension")
 		} else {
-			c.applyCRDsFromSubchartsByTag(ctx, "agent")
+			return c.applyCRDsFromSubchartsByTag(ctx, "agent")
 		}
-
-		klog.Info("crds applied successfully")
 	}
-
-	if c.isExtension {
-		installPlan := &kscorev1alpha1.InstallPlan{}
-		if err := c.client.Get(ctx, runtimeclient.ObjectKey{Name: c.extensionName}, installPlan); err != nil {
-			return err
-		}
-		// merge and patch values
-		if config.GetHookEnvAction() == config.ActionUpgrade && installPlan.Spec.Extension.Version != installPlan.Status.Version &&
-			c.cfg.MergeValues {
-
-			klog.Info("force merge values before extension version upgrade")
-
-			if err := c.mergeValuesFromExtensionChart(ctx, installPlan); err != nil {
-				return err
-			}
-		}
-
-	}
-
 	return nil
 }
 
-func (c *CoreHelper) RunHooks(ctx context.Context) error {
-
-	if c.cfg == nil || !c.cfg.Enabled {
-		klog.Info("config not found, skip extension upgrade hook")
-		return nil
-	}
-
+func (c *CoreHelper) runBuiltInHooks(ctx context.Context) error {
 	if hook, ok := hooks.GetHook(c.extensionName); ok {
 		klog.Infof("running hook: %s\n", c.extensionName)
 		if err := hook.Run(ctx, c.client, c.cfg); err != nil {
 			return fmt.Errorf("failed to run hook: %s", err)
 		}
 	}
+	return nil
+}
+
+func (c *CoreHelper) runExtraConfig(ctx context.Context) error {
+
+	if len(c.cfg.ExtraConfig) == 0 {
+		klog.Info("no extra config found, skip extension upgrade extra")
+		return nil
+	}
+
+	extensionVersion := version.Must(version.NewVersion(c.extensionVersion))
+
+	for _, extraConfig := range c.cfg.ExtraConfig {
+		klog.Info("extra config: ", extraConfig)
+		if extraConfig.Action != "" && extraConfig.Action != config.GetHookEnvAction() {
+			klog.Infof("skip extra config %s, action not match: %s", extraConfig.VersionConstraint, extraConfig.Action)
+			continue
+		}
+
+		if extraConfig.Scene != "" && extraConfig.Scene == "extension" && !c.isExtension ||
+			extraConfig.Scene != "" && extraConfig.Scene == "agent" && c.isExtension {
+			klog.Infof("skip extra config %s, scene not match: %s", extraConfig.VersionConstraint, extraConfig.Scene)
+			continue
+		}
+
+		constraints, err := version.NewConstraint(extraConfig.VersionConstraint)
+		if err != nil {
+			klog.Errorf("failed to parse version constraint: %s, error: %v", extraConfig.VersionConstraint, err)
+			continue
+		}
+		if !constraints.Check(extensionVersion) {
+			klog.Infof("skip extra config %s, version not match: %s", extraConfig.VersionConstraint, extensionVersion)
+			continue
+		}
+
+		if len(extraConfig.Command) != 0 {
+			command := exec.CommandContext(ctx, "bash", "-c", strings.Join(extraConfig.Command, " "))
+			output, err := command.CombinedOutput()
+
+			if ctx.Err() == context.DeadlineExceeded {
+				return fmt.Errorf("command execution timed out: %s", extraConfig.Command)
+			}
+
+			if err != nil {
+				return fmt.Errorf("failed to execute command: %s, error: %v", extraConfig.Command, err)
+			}
+			klog.Infof("command executed successfully: %s, output: %s", extraConfig.Command, output)
+		}
+	}
+
 	return nil
 }

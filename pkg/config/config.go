@@ -12,6 +12,13 @@ type Config struct {
 	ExtensionUpgradeHookConfigs map[string]ExtensionUpgradeHookConfig `json:"extensionUpgradeHookConfigs,omitempty"`
 }
 
+type UpgradeExtraConfig struct {
+	VersionConstraint string   `json:"versionConstraint" yaml:"versionConstraint"`
+	Action            string   `json:"action,omitempty" yaml:"action,omitempty"`
+	Scene             string   `json:"scene,omitempty" yaml:"scene,omitempty"`
+	Command           []string `json:"command,omitempty" yaml:"command,omitempty"`
+}
+
 type ExtensionUpgradeHookConfig struct {
 	Enabled bool `json:"enabled" yaml:"enabled"`
 	// InstallCrds indicates whether to force installation of CRDs when the extension is first installed.
@@ -24,6 +31,8 @@ type ExtensionUpgradeHookConfig struct {
 	FailurePolicy FailurePolicy `json:"failurePolicy,omitempty" yaml:"failurePolicy,omitempty"`
 	// DynamicOptions contains dynamic options for the extension.
 	DynamicOptions DynamicOptions `json:"dynamicOptions,omitempty" yaml:"dynamicOptions,omitempty"`
+	// Extra contains additional configurations for the extension.
+	ExtraConfig []UpgradeExtraConfig `json:"extraConfig,omitempty" yaml:"extraConfig,omitempty"`
 }
 
 type DynamicOptions map[string]interface{}
